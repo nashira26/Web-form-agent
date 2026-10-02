@@ -1,4 +1,4 @@
-# Take Home Assignment
+# AI Web Form Agent
 
 This project implements an AI agent that fills out and submits the form at:
 
@@ -121,8 +121,6 @@ Default form values are defined in `workflow.ts` and can be overridden through:
 To avoid overlapping runs, a new execution is skipped if the previous one is still in progress.
 
 ### Additional reliability checks
-
-I added two checks beyond the required functionality.
 
 **Input verification**
 
