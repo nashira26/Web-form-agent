@@ -8,6 +8,8 @@ For the problem, design decisions and trade-offs, see [DESIGN.md](DESIGN.md).
 
 The agent uses Gemini to drive a Playwright-controlled Chromium browser. Instead of relying on hardcoded CSS selectors, it interacts with the page through a simplified accessibility snapshot generated at runtime.
 
+![Agent filling out and submitting the form](assets/workflow.gif)
+
 ## Setup
 
 ```bash
