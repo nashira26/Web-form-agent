@@ -4,6 +4,8 @@ This project implements an AI agent that fills out and submits the form at:
 
 https://magical-medical-form.netlify.app/
 
+For the problem, design decisions and trade-offs, see [DESIGN.md](DESIGN.md).
+
 The agent uses Gemini to drive a Playwright-controlled Chromium browser. Instead of relying on hardcoded CSS selectors, it interacts with the page through a simplified accessibility snapshot generated at runtime.
 
 ## Setup
@@ -48,6 +50,33 @@ npm run schedule
 ---
 
 ## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Entry["Entry points"]
+        CLI["CLI<br/>npm run dev"]
+        API["HTTP API<br/>server.ts"]
+        SCH["Scheduler<br/>schedule.ts"]
+    end
+
+    WF["runWorkflow<br/>workflow.ts<br/>loop, up to 40 steps"]
+    LLM["Gemini API<br/>generateContent<br/>function calling"]
+    TOOLS["Tool layer<br/>agent.ts<br/>observe, fill, select, click, finish"]
+    PW["Playwright<br/>Chromium"]
+    FORM["Target form"]
+    VER["Confirmation check<br/>searches page text<br/>after every action"]
+
+    CLI --> WF
+    API --> WF
+    SCH --> WF
+    WF -- "history + latest snapshot" --> LLM
+    LLM -- "tool call(s)" --> WF
+    WF -- "run tool" --> TOOLS
+    TOOLS -- "result + fresh snapshot" --> WF
+    TOOLS --> PW --> FORM
+    FORM -- "page text" --> VER
+    VER -- "confirmed?" --> WF
+```
 
 The main workflow is in `workflow.ts`.
 
@@ -128,7 +157,7 @@ After every `fill` action, the value is read back from the page. If it doesn't m
 
 **Submission verification**
 
-The workflow is only considered successful after the confirmation banner appears on the page. Since the banner disappears after a short time, it is checked after every action rather than only once at the end.
+The workflow is only considered successful after confirmation text (such as “submitted” or “thank you”) is found on the page. Since the banner disappears after a short time, it is checked after every action rather than only once at the end.
 
 
 
@@ -147,12 +176,12 @@ The workflow is only considered successful after the confirmation banner appears
 src/
   _internal/
     run.ts          CLI entry point
-    setup.ts        Gemini model setup
 
   session.ts        Browser launcher
   main.ts           CLI interface
-  agent.ts     Accessibility snapshot and Playwright tools
+  agent.ts          Accessibility snapshot and Playwright tools
   workflow.ts       Agent loop, defaults and validation
   server.ts         HTTP API
   schedule.ts       Scheduler
 ```
+

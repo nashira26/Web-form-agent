@@ -1,5 +1,9 @@
 import type { Page } from "playwright";
 
+/**
+ * A compact description of one interactive element on the page, as shown to
+ * the model. `ref` is the stable handle the model uses to target it in actions.
+ */
 export type Element = {
 	ref: string;
 	role: string;
@@ -10,6 +14,13 @@ export type Element = {
 	options?: string[];
 };
 
+/**
+ * Scans the page for visible interactive elements (inputs, selects, textareas,
+ * buttons, links), tags each with a `data-agent-ref` attribute so it can be
+ * located later, and returns a description of each one. The accessible name is
+ * taken from aria-label, then a matching <label>, then placeholder, then text.
+ * Refs are reassigned on every call, so they are only valid for the latest snapshot.
+ */
 export async function snapshot(page: Page): Promise<Element[]> {
 	return page.evaluate(() => {
 		const found: any[] = [];
@@ -51,6 +62,11 @@ export async function snapshot(page: Page): Promise<Element[]> {
 	});
 }
 
+/**
+ * Formats a snapshot as plain text for the model: one line per element with its
+ * ref, role and name, plus its current value (or "(empty)") and, for selects,
+ * the list of available options.
+ */
 export function render(elements: Element[]): string {
 	return elements
 		.map((el) => {
@@ -74,6 +90,11 @@ async function withState(page: Page, message: string): Promise<string> {
 	)}`;
 }
 
+/**
+ * Takes a fresh snapshot (re-tagging elements) and returns a Playwright locator
+ * for the given ref along with its metadata. `meta` is undefined if the ref no
+ * longer exists on the page.
+ */
 async function find(page: Page, ref: string) {
 	const elements = await snapshot(page);
 	return {
@@ -82,10 +103,15 @@ async function find(page: Page, ref: string) {
 	};
 }
 
+/** Returns the current page state as text, without performing any action. */
 export async function observe(page: Page): Promise<string> {
 	return render(await snapshot(page));
 }
 
+/**
+ * Types `value` into the text field identified by `ref`, then reads the value
+ * back to confirm it took effect. Returns a result message plus the new page state.
+ */
 export async function fillField(
 	page: Page,
 	ref: string,
@@ -106,6 +132,12 @@ export async function fillField(
 	return withState(page, `Filled "${meta.name}" with "${value}". Verified.`);
 }
 
+/**
+ * Chooses `option` in the dropdown identified by `ref`. For a native <select>,
+ * it matches an option label exactly (case-insensitive) or by substring. For a
+ * custom dropdown, it clicks to open it and then clicks the first
+ * [role="option"] or <li> whose text contains `option`.
+ */
 export async function selectOption(
 	page: Page,
 	ref: string,
@@ -138,6 +170,10 @@ export async function selectOption(
 	return `Opened "${meta.name}" but found no option matching "${option}".`;
 }
 
+/**
+ * Clicks the element identified by `ref` (button, link, checkbox, etc.), waits
+ * briefly for the page to react, and returns the new page state.
+ */
 export async function clickElement(page: Page, ref: string): Promise<string> {
 	const { locator, meta } = await find(page, ref);
 	if (!meta) return `No element ${ref}. Use refs from the latest page state.`;

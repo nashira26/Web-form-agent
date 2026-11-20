@@ -1,5 +1,5 @@
 import { createSession } from "./session";
-import { DEFAULTS, runWorkflow, type Variables } from "./workflow";
+import { DEFAULTS, runWorkflow, type RunResult, type Variables } from "./workflow";
 
 const FORM_URL = "https://magical-medical-form.netlify.app/";
 
@@ -22,7 +22,14 @@ export async function main() {
 	// The scaffold's createSession launches Chromium and navigates for us,
 	// giving a ready Playwright page.
 	const page = await createSession(FORM_URL);
-	const result = await runWorkflow(page, overrides);
+	let result: RunResult;
+	try {
+		result = await runWorkflow(page, overrides);
+	} catch (e) {
+		console.error("\nFAILED —", e instanceof Error ? e.message : e);
+		await page.context().browser()?.close();
+		return process.exit(1);
+	}
 
 	// Log the result to the console
 	// exit with a non-zero code if it failed.

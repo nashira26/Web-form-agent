@@ -11,7 +11,7 @@ const KEY = process.env.GOOGLE_GENERATIVE_AI_API_KEY!;
 if (!KEY) {
 	throw new Error("Missing GOOGLE_GENERATIVE_AI_API_KEY");
 }
-const MODEL = process.env.MODEL_ID ?? "gemini-3.5-flash";
+const MODEL = process.env.MODEL_ID ?? "gemini-3.5-flash-lite";
 
 export type Variables = {
 	firstName: string;
@@ -64,13 +64,15 @@ ABOUT THIS FORM
 - Dropdowns list a placeholder first ("Select gender"). Never choose it.
 - Date fields take YYYY-MM-DD even though they display as mm/dd/yyyy.
 
-HOW TO WORK
-1. Observe once at the start. After that, every action already returns the
-   updated page - do NOT call observe again unless something looks wrong.
-2. After each fill, the result reports the value it read back. If it does not
-   match what you asked for, fix it before moving on.
-3. Fill a section completely, then open the next one.
-4. When every section is done, click Submit, then observe to confirm.
+HOW TO WORK (be fast: every turn costs time)
+1. The current page is given to you below the task. Every action also returns
+   the updated page - do NOT call observe unless something looks wrong.
+2. BATCH: in a single turn, call fill/select for EVERY field of the open
+   section at once. Refs stay valid within a turn as long as nothing is
+   clicked, so you may also add ONE click as the LAST call of the turn
+   (e.g. to open the next section, or Submit). Never put anything after a click.
+3. Each fill reports the value it read back. If one does not match, fix it.
+4. When every section is done, click Submit. The click result shows the page.
 5. Call finish exactly once, with what you actually saw.
 
 Never invent a value that was not given to you.`;
@@ -100,8 +102,7 @@ const stringParam = {
 	type: "string",
 };
 
-
-// The array defines the available tools for the agent to interact with the web page. 
+// The array defines the available tools for the agent to interact with the web page.
 const FUNCTIONS = [
 	{
 		name: "observe",
@@ -131,7 +132,11 @@ const FUNCTIONS = [
 		name: "click",
 		description:
 			"Click a button or section header. Opens a collapsed section. Refs change after this.",
-		parameters: { type: "object", properties: { ref: stringParam }, required: ["ref"] },
+		parameters: {
+			type: "object",
+			properties: { ref: stringParam },
+			required: ["ref"],
+		},
 	},
 	{
 		name: "finish",
@@ -173,6 +178,73 @@ async function pollForConfirmation(page: Page): Promise<string | undefined> {
 	}
 }
 
+// Must match the separator agent.ts's withState() puts before the page state.
+const PAGE_MARKER = "--- PAGE NOW (refs below are the current ones) ---";
+
+/** Removes the page-state section from a message's text / tool results in place. */
+function stripPageState(msg: { role?: string; parts: any[] }) {
+	if (msg.role === "model") return; // never touch model parts (thoughtSignature)
+	const cut = (s: string) => {
+		const i = s.indexOf(PAGE_MARKER);
+		return i === -1 ? s : s.slice(0, i) + "(old page state omitted)";
+	};
+	for (const p of msg.parts) {
+		if (typeof p.text === "string") p.text = cut(p.text);
+		const r = p.functionResponse?.response;
+		if (r && typeof r.result === "string") r.result = cut(r.result);
+	}
+}
+
+const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+
+/**
+ * Calls Gemini, retrying transient failures (overloaded / rate limited / network)
+ * with exponential backoff. Non-transient errors (bad key, bad request) throw at once.
+ */
+async function callGemini(contents: any[], maxAttempts = 6): Promise<any> {
+	for (let attempt = 1; ; attempt++) {
+		let status = 0;
+		let error: unknown;
+		try {
+			const res = await fetch(
+				`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${KEY}`,
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						systemInstruction: { parts: [{ text: SYSTEM }] },
+						contents,
+						tools: [{ functionDeclarations: FUNCTIONS }],
+						generationConfig: {
+							temperature: 0,
+							// Form filling needs little reasoning; low thinking cuts latency a lot.
+							thinkingConfig: { thinkingLevel: "low" },
+						},
+					}),
+				}
+			);
+			status = res.status;
+			const data: any = await res.json();
+			if (!data.error) return data;
+			status = data.error.code ?? status;
+			error = new Error(JSON.stringify(data.error));
+		} catch (e) {
+			error = e; // network error or non-JSON body
+		}
+
+		const transient = status === 0 || RETRYABLE.has(status);
+		if (!transient || attempt >= maxAttempts) throw error;
+		const delay =
+			Math.min(30_000, 1000 * 2 ** (attempt - 1)) + Math.random() * 500;
+		console.log(
+			`  Gemini ${status || "network error"}, retrying in ${Math.round(
+				delay / 1000
+			)}s (attempt ${attempt}/${maxAttempts})`
+		);
+		await new Promise((r) => setTimeout(r, delay));
+	}
+}
+
 /**
  * Runs the agent against an already-open page. The page comes from the
  * scaffold's createSession(), so the browser lifecycle stays owned by the
@@ -195,7 +267,7 @@ export async function runWorkflow(
 		async function runTool(name: string, args: any): Promise<string> {
 			switch (name) {
 				case "observe":
-					return observe(page);
+					return `${PAGE_MARKER}\n${await observe(page)}`;
 				case "fill":
 					return fillField(page, args.ref, args.value);
 				case "select":
@@ -210,29 +282,24 @@ export async function runWorkflow(
 			}
 		}
 
-		const contents: any[] = [{ role: "user", parts: [{ text: buildTask(v) }] }];
+		// Seed the first page state so the model can act on turn 1 without observing.
+		const contents: any[] = [
+			{
+				role: "user",
+				parts: [
+					{
+						text: `${buildTask(v)}\n\n${PAGE_MARKER}\n${await observe(page)}`,
+					},
+				],
+			},
+		];
 
 		for (let step = 1; step <= maxSteps && !done; step++) {
 			steps = step;
-			const res = await fetch(
-				`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${KEY}`,
-				{
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({
-						systemInstruction: { parts: [{ text: SYSTEM }] },
-						contents,
-						tools: [{ functionDeclarations: FUNCTIONS }],
-						generationConfig: { temperature: 0 },
-					}),
-				}
-			);
-
-			const data: any = await res.json();
-			if (data.error) throw new Error(JSON.stringify(data.error));
+			const data = await callGemini(contents);
 
 			const parts = data.candidates?.[0]?.content?.parts ?? [];
-      // Preserve the response parts so Gemini's thoughtSignature is carried forward..
+			// Preserve the response parts so Gemini's thoughtSignature is carried forward..
 			contents.push({ role: "model", parts });
 
 			const calls = parts.filter((p: any) => p.functionCall);
@@ -242,15 +309,34 @@ export async function runWorkflow(
 			for (const c of calls) {
 				const { name, args } = c.functionCall;
 				console.log(`  step ${step}: ${name}`, JSON.stringify(args ?? {}));
-				const result = await runTool(name, args ?? {});
+				// A Playwright failure (timeout, detached element) is reported back to
+				// the model so it can recover, instead of crashing the whole run.
+				const result = await runTool(name, args ?? {}).catch(
+					(e: any) => `ERROR running ${name}: ${e?.message ?? e}`
+				);
 				if (!confirmation) {
 					confirmation = await pollForConfirmation(page);
-					if (confirmation) console.log("  [confirmed]", confirmation);
+					if (confirmation) {
+						console.log("  [confirmed]", confirmation);
+						// The model can't see banner text (snapshots list controls only), so
+						// it would keep observing or even re-submit. End the run here.
+						done ??= {
+							success: true,
+							summary: "Filled all sections and submitted the form.",
+						};
+					}
 				}
 				responses.push({
 					functionResponse: { name, response: { result } },
 				});
 			}
+			// Old page snapshots are stale and only add tokens (= latency). Keep just
+			// the newest one: strip it from everything already in history and from
+			// all but the last response of this batch.
+			for (const msg of contents) stripPageState(msg);
+			responses.forEach((r, i) => {
+				if (i < responses.length - 1) stripPageState({ parts: [r] });
+			});
 			contents.push({ role: "user", parts: responses });
 		}
 
